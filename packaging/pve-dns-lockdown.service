@@ -1,0 +1,15 @@
+[Unit]
+Description=pve-dns-lockdown DNS and HTTP orchestration
+After=networking.service
+Wants=networking.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pve-dns-lockdown -conf /etc/pve-dns-lockdown/Corefile
+StandardOutput=journal+console
+StandardError=journal+console
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

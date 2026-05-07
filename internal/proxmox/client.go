@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -22,6 +24,13 @@ type Client struct {
 
 	hc *http.Client
 }
+
+// Errors from ResolveGuestByVMID and cluster resource reads.
+var (
+	ErrClusterResourcesForbidden = errors.New("proxmox: forbidden to read cluster resources")
+	ErrGuestVMIDNotFound         = errors.New("proxmox: guest vmid not found in cluster resources")
+	ErrGuestVMIDAmbiguous        = errors.New("proxmox: multiple guests match vmid")
+)
 
 // New parses base like https://host:8006 — adds / if needed.
 func New(base, tokenID, tokenSecret string, insecureTLS bool) (*Client, error) {
@@ -54,6 +63,22 @@ type apiEnvelope struct {
 
 func (c *Client) authorized(req *http.Request) {
 	req.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", c.TokenID, c.TokenSecret))
+}
+
+// VersionInfo is the subset of GET /version needed for UI probes.
+type VersionInfo struct {
+	Version string `json:"version"`
+	Release string `json:"release"`
+	RepID   string `json:"repoid"`
+}
+
+// GetVersion calls GET /api2/json/version with API authentication.
+func (c *Client) GetVersion() (VersionInfo, error) {
+	var v VersionInfo
+	if err := c.getJSON("/api2/json/version", &v); err != nil {
+		return VersionInfo{}, err
+	}
+	return v, nil
 }
 
 func (c *Client) getJSON(path string, out interface{}) error {
@@ -184,6 +209,113 @@ func intFromAny(v any) int {
 	}
 }
 
+// ResolveGuestByVMID maps VMID → node name and guest api type ("lxc" | "qemu") using GET /cluster/resources.
+func (c *Client) ResolveGuestByVMID(vmid int) (node string, guestType string, err error) {
+	if vmid <= 0 {
+		return "", "", fmt.Errorf("invalid vmid %d", vmid)
+	}
+	req, err := http.NewRequest(http.MethodGet, c.Base.String()+"/api2/json/cluster/resources", nil)
+	if err != nil {
+		return "", "", err
+	}
+	c.authorized(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", err
+	}
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return "", "", ErrClusterResourcesForbidden
+	case http.StatusOK:
+	default:
+		return "", "", fmt.Errorf("GET /api2/json/cluster/resources: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var env apiEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", "", fmt.Errorf("cluster resources envelope: %w", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(env.Data, &rows); err != nil {
+		return "", "", fmt.Errorf("cluster resources decode: %w", err)
+	}
+	type hit struct {
+		node string
+		typ  string
+	}
+	seen := make(map[string]struct{})
+	var hits []hit
+	for _, row := range rows {
+		guestKind := guestKindFromClusterRow(row)
+		if guestKind != "lxc" && guestKind != "qemu" {
+			continue
+		}
+		id := vmidFromClusterRow(row)
+		if id != vmid {
+			continue
+		}
+		node := strings.TrimSpace(asString(row["node"]))
+		if node == "" {
+			continue
+		}
+		key := guestKind + "\x00" + node
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		hits = append(hits, hit{node: node, typ: guestKind})
+	}
+	switch len(hits) {
+	case 0:
+		return "", "", ErrGuestVMIDNotFound
+	case 1:
+		return hits[0].node, hits[0].typ, nil
+	default:
+		return "", "", fmt.Errorf("%w: vmid=%d matched %d guests", ErrGuestVMIDAmbiguous, vmid, len(hits))
+	}
+}
+
+// vmidFromClusterRow returns VMID from numeric/string vmid key or from composite id (e.g. qemu/116).
+func vmidFromClusterRow(m map[string]any) int {
+	if v := intFromAny(m["vmid"]); v > 0 {
+		return v
+	}
+	return vmidFromCompositeResourceID(asString(m["id"]))
+}
+
+func vmidFromCompositeResourceID(id string) int {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return 0
+	}
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		return intFromAny(id[i+1:])
+	}
+	return intFromAny(id)
+}
+
+// guestKindFromClusterRow maps a row to api guest path segment "lxc" or "qemu".
+func guestKindFromClusterRow(m map[string]any) string {
+	t := strings.ToLower(strings.TrimSpace(asString(m["type"])))
+	switch t {
+	case "lxc", "qemu":
+		return t
+	}
+	p := strings.ToLower(strings.TrimSpace(asString(m["id"])))
+	switch {
+	case strings.HasPrefix(p, "lxc/"):
+		return "lxc"
+	case strings.HasPrefix(p, "qemu/"):
+		return "qemu"
+	default:
+		return t
+	}
+}
+
 func guestPath(guestType, node string, vmid int) string {
 	switch strings.ToLower(strings.TrimSpace(guestType)) {
 	case "lxc":
@@ -227,6 +359,25 @@ func VMNameLabel(cfg map[string]any) string {
 	default:
 		return host
 	}
+}
+
+// GuestTargetDisplay returns "vmid (hostname)" style text like Proxmox resource lists.
+// Uses config hostname when set; otherwise falls back to the guest name field (often set for QEMU).
+func GuestTargetDisplay(vmid int, cfg map[string]any) string {
+	host := ""
+	name := ""
+	if cfg != nil {
+		host = strings.TrimSpace(asString(cfg["hostname"]))
+		name = strings.TrimSpace(asString(cfg["name"]))
+	}
+	label := host
+	if label == "" {
+		label = name
+	}
+	if label == "" {
+		label = "-"
+	}
+	return fmt.Sprintf("%d (%s)", vmid, label)
 }
 
 // FirewallOptions holds outbound policy.
@@ -331,44 +482,122 @@ func (c *Client) CreateFirewallRule(guestType, node string, vmid int, r Firewall
 const RuleTagPrefix = "pve-dns-lockdown:"
 const BootstrapComment = "pve-dns-lockdown:bootstrap:dns-server"
 
-// SyncOutboundAllow ensures ACCEPT out rule exists for dest IP tagged with fqdn/ip.
-func (c *Client) SyncOutboundAllow(guestType, node string, vmid int, fqdn string, ip string, cache *RuleSyncCache) error {
-	wantComment := RuleTagPrefix + fqdn + ":" + ip
+// IP family tokens stored in dynamic rule comments (after fqdn).
+const (
+	IPFamilyFour = "ipv4"
+	IPFamilySix  = "ipv6"
+)
+
+// IPFamilyFromIP returns IPFamilyFour or IPFamilySix.
+func IPFamilyFromIP(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	if ip.To4() != nil {
+		return IPFamilyFour
+	}
+	return IPFamilySix
+}
+
+// CanonicalIPString parses s as IP and returns canonical form, or s if unparseable.
+func CanonicalIPString(s string) string {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return s
+	}
+	return ip.String()
+}
+
+func fqdnOutboundTag(fqdn, family string) string {
+	return RuleTagPrefix + fqdn + ":" + family
+}
+
+func ruleManagedForFQDNFamily(comment, fqdn, family string) bool {
+	if !strings.HasPrefix(comment, RuleTagPrefix+fqdn+":") {
+		return false
+	}
+	rest := strings.TrimPrefix(comment, RuleTagPrefix+fqdn+":")
+	if rest == IPFamilyFour || rest == IPFamilySix {
+		return rest == family
+	}
+	if lip := net.ParseIP(rest); lip != nil {
+		return IPFamilyFromIP(lip) == family
+	}
+	return false
+}
+
+// dynamicRuleMatchesDest reports whether r is our dynamic egress allow for fqdn with canonical dest canon and family.
+func dynamicRuleMatchesDest(r RulePos, fqdn, canon, family string) bool {
+	if !strings.HasPrefix(r.Comment, RuleTagPrefix) || r.Comment == BootstrapComment {
+		return false
+	}
+	if !strings.EqualFold(r.Action, "ACCEPT") || !strings.EqualFold(r.Type, "out") {
+		return false
+	}
+	if CanonicalIPString(r.Dest) != canon {
+		return false
+	}
+	if !strings.HasPrefix(r.Comment, RuleTagPrefix+fqdn+":") {
+		return false
+	}
+	rest := strings.TrimPrefix(r.Comment, RuleTagPrefix+fqdn+":")
+	if rest == IPFamilyFour || rest == IPFamilySix {
+		return rest == family
+	}
+	if lip := net.ParseIP(rest); lip != nil {
+		return IPFamilyFromIP(lip) == family && lip.String() == canon
+	}
+	return false
+}
+
+// SyncOutboundAllow ensures ACCEPT out rule exists for dest IP tagged with fqdn and IP family (ipv4|ipv6).
+// changed is true when a new firewall rule was created; false means the rule already existed (no-op).
+func (c *Client) SyncOutboundAllow(guestType, node string, vmid int, fqdn string, ip string, cache *RuleSyncCache) (changed bool, err error) {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false, fmt.Errorf("sync outbound allow: invalid IP %q", ip)
+	}
+	family := IPFamilyFromIP(parsed)
+	canon := parsed.String()
+	wantComment := fqdnOutboundTag(fqdn, family)
 	rules, err := cache.list(c, guestType, node, vmid)
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, r := range rules {
-		if r.Comment == wantComment && strings.EqualFold(r.Dest, ip) && strings.EqualFold(r.Action, "ACCEPT") && strings.EqualFold(r.Type, "out") {
-			return nil
+		if dynamicRuleMatchesDest(r, fqdn, canon, family) {
+			return false, nil
 		}
 	}
 	if err := c.CreateFirewallRule(guestType, node, vmid, FirewallRule{
 		Action:  "ACCEPT",
 		Type:    "out",
-		Dest:    ip,
+		Dest:    canon,
 		Comment: wantComment,
 		Enable:  1,
 	}); err != nil {
-		return err
+		return false, err
 	}
 	cache.invalidate()
-	return nil
+	return true, nil
 }
 
-// RemoveDynamicRules removes rules tagged by us that match fqdn/ip pair or dest-only matches.
-func (c *Client) RemoveDynamicRules(guestType, node string, vmid int, fqdn string, ip string, cache *RuleSyncCache) error {
+// RemoveDynamicRules removes dynamic allow rules for fqdn+ip (new fqdn:ipv4|ipv6 comment or legacy fqdn:ip).
+// removed is true when at least one rule was deleted.
+func (c *Client) RemoveDynamicRules(guestType, node string, vmid int, fqdn string, ip string, cache *RuleSyncCache) (removed bool, err error) {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false, nil
+	}
+	canon := parsed.String()
+	family := IPFamilyFromIP(parsed)
 	rules, err := cache.list(c, guestType, node, vmid)
 	if err != nil {
-		return err
+		return false, err
 	}
-	want := RuleTagPrefix + fqdn + ":" + ip
 	todel := map[int]struct{}{}
 	for _, r := range rules {
-		if !strings.HasPrefix(r.Comment, RuleTagPrefix) {
-			continue
-		}
-		if r.Comment == want || (strings.Contains(r.Comment, ":"+ip) && strings.Contains(r.Comment, fqdn)) {
+		if dynamicRuleMatchesDest(r, fqdn, canon, family) {
 			todel[r.Pos] = struct{}{}
 		}
 	}
@@ -377,13 +606,96 @@ func (c *Client) RemoveDynamicRules(guestType, node string, vmid int, fqdn strin
 		poses = append(poses, p)
 	}
 	sort.Slice(poses, func(i, j int) bool { return poses[i] > poses[j] })
+	if len(poses) == 0 {
+		return false, nil
+	}
 	for _, pos := range poses {
 		if err := c.DeleteFirewallRule(guestType, node, vmid, pos); err != nil {
-			return err
+			return true, err
 		}
 		cache.invalidate()
 	}
-	return nil
+	return true, nil
+}
+
+// PruneStaleOutboundAllowsForFQDN deletes managed ACCEPT out rules for fqdn+family whose dest is not in desiredDests
+// (canonical keys). If desiredDests is empty, deletes all managed rules for that fqdn+family.
+// Returns canonical dest strings removed. Only rules matching new (fqdn:ipv4|ipv6) or legacy (fqdn:ip) comments are touched.
+func (c *Client) PruneStaleOutboundAllowsForFQDN(guestType, node string, vmid int, fqdn, family string, desiredDests map[string]struct{}, cache *RuleSyncCache) (removed []string, err error) {
+	if family != IPFamilyFour && family != IPFamilySix {
+		return nil, fmt.Errorf("prune: invalid family %q", family)
+	}
+	rules, err := cache.list(c, guestType, node, vmid)
+	if err != nil {
+		return nil, err
+	}
+	todel := map[int]string{} // pos -> canonical dest removed
+	for _, r := range rules {
+		if !strings.HasPrefix(r.Comment, RuleTagPrefix) || r.Comment == BootstrapComment {
+			continue
+		}
+		if !strings.EqualFold(r.Action, "ACCEPT") || !strings.EqualFold(r.Type, "out") {
+			continue
+		}
+		if !ruleManagedForFQDNFamily(r.Comment, fqdn, family) {
+			continue
+		}
+		dIP := net.ParseIP(r.Dest)
+		if dIP == nil {
+			continue
+		}
+		if IPFamilyFromIP(dIP) != family {
+			continue
+		}
+		canon := dIP.String()
+		if len(desiredDests) > 0 {
+			if _, ok := desiredDests[canon]; ok {
+				continue
+			}
+		}
+		todel[r.Pos] = canon
+	}
+	var poses []int
+	for pos := range todel {
+		poses = append(poses, pos)
+	}
+	sort.Slice(poses, func(i, j int) bool { return poses[i] > poses[j] })
+	for _, pos := range poses {
+		if err := c.DeleteFirewallRule(guestType, node, vmid, pos); err != nil {
+			return removed, err
+		}
+		removed = append(removed, todel[pos])
+		cache.invalidate()
+	}
+	return removed, nil
+}
+
+// RemoveAllManagedEgressForFQDN deletes all dynamic ACCEPT out rules for fqdn (both IPv4 and IPv6 comment families,
+// including legacy fqdn:ip comments). Returns canonical dest IPs removed (sorted, deduplicated).
+func (c *Client) RemoveAllManagedEgressForFQDN(guestType, node string, vmid int, fqdn string, cache *RuleSyncCache) (removed []string, err error) {
+	wantEmpty := map[string]struct{}{}
+	r4, err := c.PruneStaleOutboundAllowsForFQDN(guestType, node, vmid, fqdn, IPFamilyFour, wantEmpty, cache)
+	if err != nil {
+		return nil, err
+	}
+	r6, err := c.PruneStaleOutboundAllowsForFQDN(guestType, node, vmid, fqdn, IPFamilySix, wantEmpty, cache)
+	if err != nil {
+		return r4, err
+	}
+	combined := append(append([]string(nil), r4...), r6...)
+	uniq := make(map[string]struct{}, len(combined))
+	for _, ip := range combined {
+		if ip == "" {
+			continue
+		}
+		if _, ok := uniq[ip]; ok {
+			continue
+		}
+		uniq[ip] = struct{}{}
+		removed = append(removed, ip)
+	}
+	sort.Strings(removed)
+	return removed, nil
 }
 
 // EnsureBootstrapDNS allows UDP+TCP :53 outbound to resolverIP.

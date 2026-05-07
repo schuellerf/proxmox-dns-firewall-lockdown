@@ -1,17 +1,19 @@
 .DEFAULT_GOAL := help
-.PHONY: help vendor-coredns build-coredns test clean proxmox-ct clean-dist
+.PHONY: help vendor-coredns build-coredns test clean proxmox-ct-image proxmox-ct clean-dist
 
 ROOT := $(abspath .)
 CONTAINER_RUNTIME ?= podman
 IMAGE_TAG ?= localhost/pve-dns-lockdown:bookworm
 DIST_DIR := $(ROOT)/dist
-TEMPLATE_BASENAME ?= debian-12-pve-lockdown_ct-template
+TEMPLATE_BASENAME ?= pve-dns-lockdown_ct-template
 COREDNS_VER := v1.12.4
 GO_MODULE := github.com/schuellerf/proxmox-dns-firewall-lockdown
 
 BUILD_DIR := $(ROOT)/.build
+# Versioned tree so bumping COREDNS_VER automatically reclones; go.mod replace still points at ./.build/coredns
+COREDNS_STAGE := $(BUILD_DIR)/$(COREDNS_VER)/coredns
+COREDNS_HEAD := $(COREDNS_STAGE)/coredns.go
 COREDNS_SRC := $(BUILD_DIR)/coredns
-COREDNS_HEAD := $(COREDNS_SRC)/coredns.go
 
 # Targets documented for `make help` list the text after "##" on the same line as the rule.
 help: ## List targets documented with "##" on the rule line (this listing)
@@ -31,31 +33,36 @@ help: ## List targets documented with "##" on the rule line (this listing)
 $(BUILD_DIR):
 	mkdir -p $@
 
-# Clone CoreDNS when the sentinel file is missing.
+# Clone CoreDNS under .build/<COREDNS_VER>/ when that revision is missing; symlink .build/coredns for go.mod replace.
 $(COREDNS_HEAD): | $(BUILD_DIR)
-	@test -f $(COREDNS_HEAD) || git clone --depth 1 --branch $(COREDNS_VER) https://github.com/coredns/coredns "$(COREDNS_SRC)"
+	@test -f "$(COREDNS_HEAD)" || git clone --depth 1 --branch $(COREDNS_VER) https://github.com/coredns/coredns "$(COREDNS_STAGE)"
+	@cd "$(BUILD_DIR)" && ln -sfnT "$(COREDNS_VER)/coredns" coredns
 
-vendor-coredns: $(COREDNS_HEAD) ## Clone CoreDNS (if missing) and run scripts/patch-coredns-vendor.py
+vendor-coredns: $(COREDNS_HEAD) ## Fetch CoreDNS into .build/$(COREDNS_VER)/; bumping version reclones + patch-coredns-vendor.py
 	python3 "$(ROOT)/scripts/patch-coredns-vendor.py" \
 	  --coredns "$(COREDNS_SRC)" \
 	  --module "$(GO_MODULE)" \
 	  --replace-path "$(ROOT)"
 
-build-coredns: vendor-coredns ## Build bin/pve-lockdown (runs go generate inside CoreDNS checkout)
+build-coredns: vendor-coredns ## Build bin/pve-dns-lockdown (runs go generate inside CoreDNS checkout)
 	cd "$(COREDNS_SRC)" && GOFLAGS=-buildvcs=false go generate coredns.go && GOFLAGS=-buildvcs=false go get ./...
 	mkdir -p "$(ROOT)/bin"
-	cd "$(ROOT)" && GOFLAGS=-buildvcs=false go build -o "$(ROOT)/bin/pve-lockdown" ./cmd/pve-lockdown
+	cd "$(ROOT)" && GOFLAGS=-buildvcs=false go build -o "$(ROOT)/bin/pve-dns-lockdown" ./cmd/pve-dns-lockdown
 
 test: vendor-coredns ## Run go test for this repo
 	cd "$(COREDNS_SRC)" && GOFLAGS=-buildvcs=false go generate coredns.go && GOFLAGS=-buildvcs=false go get ./...
 	cd "$(ROOT)" && GOFLAGS=-buildvcs=false go test ./...
 
-clean: ## Remove bin/ and cloned CoreDNS under .build/coredns
-	rm -rf "$(ROOT)/bin" "$(COREDNS_SRC)"
+clean: clean-dist ## Remove bin/, dist/, and entire .build/ (CoreDNS checkout)
+	rm -rf "$(ROOT)/bin" "$(BUILD_DIR)"
 
-proxmox-ct: ## Build OCI image and export gzip rootfs tarball for Proxmox vztmpl
-	@ROOT="$(ROOT)" CONTAINER_RUNTIME="$(CONTAINER_RUNTIME)" IMAGE_TAG="$(IMAGE_TAG)" \
-		DIST_DIR="$(DIST_DIR)" TEMPLATE_BASENAME="$(TEMPLATE_BASENAME)" \
+proxmox-ct-image: build-coredns ## Build OCI image from Containerfile tagged as $(IMAGE_TAG)
+	"$(CONTAINER_RUNTIME)" build -f "$(ROOT)/Containerfile" -t "$(IMAGE_TAG)" "$(ROOT)"
+
+proxmox-ct: proxmox-ct-image ## Host binary + OCI image + gzip rootfs tarball for Proxmox vztmpl
+	@STAMP=$$(date +%Y%m%d_%H%M%S); \
+	ROOT="$(ROOT)" CONTAINER_RUNTIME="$(CONTAINER_RUNTIME)" IMAGE_TAG="$(IMAGE_TAG)" \
+		DIST_DIR="$(DIST_DIR)" TEMPLATE_BASENAME="$(TEMPLATE_BASENAME)" TEMPLATE_STAMP="$$STAMP" \
 		sh "$(ROOT)/scripts/export-proxmox-ct-rootfs.sh"
 
 clean-dist: ## Remove generated dist/ CT template tarballs

@@ -1,0 +1,7 @@
+# Default for appliance CT: DHCP on first NIC. Creating a CT in Proxmox may replace this
+# if you configure a static address in pct (recommended for production ops).
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp

@@ -10,7 +10,7 @@ import (
 	"github.com/coredns/coredns/coremain"
 
 	_ "github.com/coredns/coredns/core/plugin"
-	_ "github.com/schuellerf/proxmox-dns-firewall-lockdown/plugin/lockdown"
+	_ "github.com/schuellerf/proxmox-dns-firewall-lockdown/plugin/pve-dns-lockdown"
 )
 
 func main() {

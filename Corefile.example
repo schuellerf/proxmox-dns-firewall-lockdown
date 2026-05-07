@@ -1,7 +1,13 @@
 # Example Corefile — run from /etc/pve-dns-lockdown/ with `-conf`.
+# Plugins run in CoreDNS global directive order (`plugin.cfg`), not the order of lines here.
+# The custom `pve-dns-lockdown` plugin is registered *before* `forward` in plugin.cfg so forwarded
+# answers pass through the hook (DNS→firewall + `pve-dns-lockdown: dns` journal lines).
+#
+# Prefer nameservers written by DHCP/network to /etc/resolv.conf (typical CT with dhclient).
+# 8.8.8.8 / 8.8.4.4 are tried after those if the upstream returns SERVFAIL or REFUSED, or exchange errors.
 .:53 {
-  lockdown {}
-  forward . 8.8.8.8 8.8.4.4
+  pve-dns-lockdown {}
+  forward . /etc/resolv.conf 8.8.8.8 8.8.4.4
   log
   errors
 }

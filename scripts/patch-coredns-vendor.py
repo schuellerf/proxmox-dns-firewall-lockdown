@@ -5,26 +5,33 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-# Historical Go module path in older clones of .build/coredns (migrate on vendor-coredns).
+# Historical Go module path in older clones under .build/<ver>/coredns (migrate on vendor-coredns).
 LEGACY_PREFIX = "github.com/fschulle/proxmox-dns-firewall-lockdown"
 
 
 def patch_plugin_cfg(path: Path, module: str) -> None:
-    marker_suffix = "/plugin/lockdown"
+    marker_suffix = "/plugin/pve-dns-lockdown"
+    legacy_marker = "/plugin/lockdown"
     raw = (
         path.read_text()
         .replace(LEGACY_PREFIX, module)
     )
     lines = raw.splitlines()
-    want = f"lockdown:{module}{marker_suffix}"
+    want = f"pve-dns-lockdown:{module}{marker_suffix}"
     out: list[str] = []
+    seen_plugin = False
     for ln in lines:
         st = ln.strip()
-        if st.startswith("lockdown:") and st.endswith(marker_suffix) and "proxmox-dns-firewall-lockdown" in st:
-            continue
+        if st.startswith("lockdown:") and st.endswith(legacy_marker) and "proxmox-dns-firewall-lockdown" in st:
+            continue  # legacy directive; re-insert before forward
+        if st.startswith("pve-dns-lockdown:") and st.endswith(marker_suffix) and "proxmox-dns-firewall-lockdown" in st:
+            continue  # drop to re-insert before forward
+        if st.startswith("forward:") and not seen_plugin:
+            out.append(want)
+            seen_plugin = True
         out.append(ln)
 
-    if want not in [x.strip() for x in out]:
+    if not seen_plugin and want not in [x.strip() for x in out]:
         out.append(want)
 
     path.write_text("\n".join(out) + "\n")

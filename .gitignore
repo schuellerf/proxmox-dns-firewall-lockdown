@@ -3,3 +3,4 @@ bin/
 dist/
 *.swp
 *.test
+.playwright-mcp/
