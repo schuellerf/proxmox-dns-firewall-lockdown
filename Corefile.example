@@ -1,0 +1,7 @@
+# Example Corefile — run from /etc/pve-dns-lockdown/ with `-conf`.
+.:53 {
+  lockdown {}
+  forward . 8.8.8.8 8.8.4.4
+  log
+  errors
+}
