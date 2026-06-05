@@ -226,8 +226,8 @@ small{color:#444}
 #firewall_activity li.fw-ok{border-color:#c3e6cb;background:#e8f5e9}
 #firewall_activity li.fw-empty{background:#f5f5f5;border-color:#ddd;color:#444}
 #allowlist_entries{list-style:none;padding:0;margin:0;max-height:20rem;overflow:auto}
-.allowlist-row{display:flex;align-items:center;gap:.5rem;margin:.25rem 0;padding:.35rem .5rem;border:1px solid #ccc;border-radius:4px;background:#fafafa;font-family:ui-monospace,monospace;font-size:90%;line-height:1.35}
-.allowlist-row.is-disabled{background:#f5f5f5;color:#555}
+.allowlist-row{display:flex;align-items:center;gap:.5rem;margin:.1rem 0;padding:.15rem 0;font-family:ui-monospace,monospace;font-size:90%;line-height:1.35}
+.allowlist-row.is-disabled{color:#555}
 .allowlist-row.is-new{animation:allowlist-pulse 3s ease-out}
 .allowlist-row.allowlist-empty{color:#444;font-family:system-ui,sans-serif;font-size:87.5%}
 .allowlist-toggle{margin:0;min-width:5.5rem;padding:.25rem .5rem;font-size:82%;cursor:pointer;border-radius:4px;border:1px solid #aaa}
@@ -237,7 +237,7 @@ small{color:#444}
 .allowlist-name{flex:1;word-break:break-word}
 #allowlist_advanced{margin-top:.75rem}
 #allowlist_advanced summary{cursor:pointer;font-size:93%;color:#444}
-@keyframes allowlist-pulse{0%,15%{background:#fff3cd;border-color:#856404}100%{background:#fafafa;border-color:#ccc}}
+@keyframes allowlist-pulse{0%,15%{background:#fff3cd}100%{background:transparent}}
 </style>
 </head>
 <body>
