@@ -1,5 +1,9 @@
 # Proxmox DNS + dynamic egress firewall
 
+![Sir Blockalot — mascot of pve-dns-lockdown](packaging/banner.png)
+
+**Sir Blockalot** is the mascot of **pve-dns-lockdown** — the knight who stands at the DNS gate and only lowers the drawbridge for names you allow.
+
 This is a DNS resolver (CoreDNS + custom plugin) for Proxmox which locks outbound traffic of a given guest VM by modifying the guest's firewall rules.
 
 You have to grant access to a specific guest VM’s Proxmox config and firewall APIs: put the narrow role **`/vms/<VMID>`** on **both** the realm **user** and the **API token** (privsep tokens intersect permissions; the token cannot exceed the user). Details: [docs/proxmox-setup.md](docs/proxmox-setup.md). Bootstrap rules initially allow DNS to **this** host on port **53**.
