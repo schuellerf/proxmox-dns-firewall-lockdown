@@ -230,7 +230,7 @@ small{color:#444}
 .allowlist-row.is-disabled{background:#f5f5f5;color:#555}
 .allowlist-row.is-new{animation:allowlist-pulse 3s ease-out}
 .allowlist-row.allowlist-empty{color:#444;font-family:system-ui,sans-serif;font-size:87.5%}
-.allowlist-toggle{margin:0;min-width:4.5rem;padding:.25rem .5rem;font-size:82%;cursor:pointer;border-radius:4px;border:1px solid #aaa}
+.allowlist-toggle{margin:0;min-width:5.5rem;padding:.25rem .5rem;font-size:82%;cursor:pointer;border-radius:4px;border:1px solid #aaa}
 .allowlist-toggle.is-allowed{background:#d4edda;border-color:#c3e6cb;color:#155724}
 .allowlist-toggle.is-blocked{background:#e2e3e5;border-color:#adb5bd;color:#383d41}
 .allowlist-toggle:disabled{opacity:.55;cursor:wait}
@@ -244,7 +244,7 @@ small{color:#444}
 <h1 id="page_title">pve-dns-lockdown</h1>
 <div id="proxmox_err" role="alert" aria-live="polite"></div>
 <div id="banner"></div>
-<h2>Allow list <small>(use Allow/Block per name — saves immediately; new DNS names appear as blocked suggestions)</small></h2>
+<h2>Allow list <small>(use Allowed/Blocked per name — saves immediately; new DNS names appear as blocked suggestions)</small></h2>
 <div id="allowlist_notify" role="status" aria-live="polite"></div>
 <ul id="allowlist_entries" aria-label="Allow list entries"></ul>
 <div id="allowlist_msg" role="status"></div>
@@ -278,7 +278,7 @@ small{color:#444}
 <script>
 const el=(id)=>document.getElementById(id);
 let dirty=false,lastClean='',settingsDirty=false;
-let saveInFlight=false,pendingState=null;
+let saveInFlight=false,pendingState=null,skipNextNotify=false;
 let knownFQDNs=null,baseTitle='pve-dns-lockdown';
 let titleFlashTimer=null,titleFlashStop=null;
 const list=el('list'),saveBtn=el('save'),revertBtn=el('revert'),banner=el('banner');
@@ -391,6 +391,13 @@ function highlightNewRows(names){
   }
   if(first) first.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
+function dismissEntryNotify(fqdn){
+  const box=el('allowlist_notify');
+  if(box.className) box.className='',box.textContent='';
+  stopTitleFlash();
+  const row=allowlistEntries.querySelector('.allowlist-row[data-fqdn="'+fqdn+'"]');
+  if(row) row.classList.remove('is-new');
+}
 function notifyNewNames(names){
   if(!names.length) return;
   showAllowlistNotify(names);
@@ -414,7 +421,7 @@ function renderAllowlistRows(text,{disabled=false}={}){
     const btn=document.createElement('button');
     btn.type='button';
     btn.className='allowlist-toggle'+(entry.allowed?' is-allowed':' is-blocked');
-    btn.textContent=entry.allowed?'Allow':'Block';
+    btn.textContent=entry.allowed?'Allowed':'Blocked';
     btn.title=entry.allowed?'Allowed — click to block':'Blocked — click to allow';
     btn.disabled=disabled||saveInFlight;
     btn.addEventListener('click',()=>toggleAllowlistRow(entry.fqdn));
@@ -431,11 +438,11 @@ function setAllowlistMsg(cls,text){
   msgEl.className=cls||'';
   msgEl.textContent=text||'';
 }
-async function saveAllowlistText(text){
+async function saveAllowlistText(text,{quiet=false}={}){
   if(saveInFlight) return false;
   saveInFlight=true;
   renderAllowlistRows(text,{disabled:true});
-  el('status').textContent='Saving…';
+  if(!quiet) el('status').textContent='Saving…';
   if(!dirty) setAllowlistMsg('','');
   try{
     const r=await fetch('/api/save-list',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:text});
@@ -445,7 +452,8 @@ async function saveAllowlistText(text){
       const body=(j&&j.error)||respText||('HTTP '+r.status);
       const hint=(j&&j.error_detail)?('\n\n'+j.error_detail):'';
       setAllowlistMsg('err',body+hint);
-      el('status').textContent='Allow list save failed ('+r.status+')';
+      if(!quiet) el('status').textContent='Allow list save failed ('+r.status+')';
+      skipNextNotify=false;
       renderAllowlistRows(lastClean);
       return false;
     }
@@ -455,7 +463,7 @@ async function saveAllowlistText(text){
     saveBtn.disabled=true;
     revertBtn.disabled=true;
     renderAllowlistRows(text);
-    el('status').textContent='Saved';
+    if(!quiet) el('status').textContent='Saved';
     return true;
   }finally{
     saveInFlight=false;
@@ -477,12 +485,15 @@ function toggleAllowlistRow(fqdn){
     break;
   }
   if(!found) return;
-  saveAllowlistText(serializeAllowlistEntries(entries));
+  dismissEntryNotify(fqdn);
+  skipNextNotify=true;
+  saveAllowlistText(serializeAllowlistEntries(entries),{quiet:true});
 }
 function syncAllowlistFromServer(text){
   const {current,newOnes}=detectNewFQDNs(knownFQDNs,text);
   const isFirst=knownFQDNs===null;
-  if(!isFirst&&newOnes.length) notifyNewNames(newOnes);
+  if(!isFirst&&!skipNextNotify&&newOnes.length) notifyNewNames(newOnes);
+  skipNextNotify=false;
   knownFQDNs=current;
   list.value=text;
   lastClean=text;
