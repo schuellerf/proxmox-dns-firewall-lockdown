@@ -17,6 +17,26 @@ func Normalize(name string) string {
 	return s
 }
 
+// ParseListed returns FQDNs from non-empty lines, whether allowed or #commented.
+func ParseListed(lines []string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			line = strings.TrimSpace(line[1:])
+		}
+		n := Normalize(line)
+		if n == "" {
+			continue
+		}
+		out[n] = struct{}{}
+	}
+	return out
+}
+
 // ParseAllowed returns FQDNs that are allow-listed (non-empty, non-comment lines).
 func ParseAllowed(innerLines []string) map[string]struct{} {
 	out := make(map[string]struct{})

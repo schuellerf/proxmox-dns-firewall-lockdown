@@ -496,12 +496,15 @@ func (c *Coordinator) SaveMergedList(text string) error {
 	if px == nil {
 		return ErrNotConfigured
 	}
-	oldAllowed := allowlist.ParseAllowed(splitAllowLines(oldMerged))
+	oldLines := splitAllowLines(oldMerged)
+	oldAllowed := allowlist.ParseAllowed(oldLines)
 	normalizedText := normalizeAllowlistMultiline(text)
 	lines := strings.Split(normalizedText, "\n")
 	newAllowed := allowlist.ParseAllowed(lines)
+	newListed := allowlist.ParseListed(lines)
 	newly := newlyAllowedFQDNs(oldAllowed, newAllowed)
 	newlyDenied := newlyDeniedFQDNs(oldAllowed, newAllowed)
+	removed := newlyRemovedFQDNs(allowlist.ParseListed(oldLines), newListed)
 
 	newDesc, err := allowlist.SpliceBlock(desc, lines)
 	if err != nil {
@@ -516,7 +519,26 @@ func (c *Coordinator) SaveMergedList(text string) error {
 	vmid := s.PVEVMID
 	node := s.PVENode
 
+	for _, fqdn := range removed {
+		removedCanon, perr := px.RemoveAllManagedEgressForFQDN(gt, node, vmid, fqdn, c.ruleSync)
+		for _, rip := range removedCanon {
+			dnsJournal.Printf("fqdn=%q ip=%s allowlisted=false save_reconcile=true result=allow_pruned removed=true", fqdn, rip)
+			rows = append(rows, FirewallActivityRow{FQDN: fqdn, IP: rip, Result: "allow_pruned"})
+		}
+		if perr != nil {
+			dnsJournal.Printf("fqdn=%q allowlisted=false save_reconcile=true result=prune_failed removed=true err=%v", fqdn, perr)
+			rows = append(rows, FirewallActivityRow{FQDN: fqdn, Result: "allow_failed", Err: fmt.Sprintf("remove prune: %v", perr)})
+		}
+		c.mu.Lock()
+		delete(c.Seen, fqdn)
+		delete(c.rejectedResolveIPs, fqdn)
+		c.mu.Unlock()
+	}
+
 	for _, fqdn := range newlyDenied {
+		if _, stillListed := newListed[fqdn]; !stillListed {
+			continue
+		}
 		removedCanon, perr := px.RemoveAllManagedEgressForFQDN(gt, node, vmid, fqdn, c.ruleSync)
 		for _, rip := range removedCanon {
 			dnsJournal.Printf("fqdn=%q ip=%s allowlisted=false save_reconcile=true result=allow_pruned", fqdn, rip)
@@ -594,6 +616,19 @@ func newlyAllowedFQDNs(oldAllowed, newAllowed map[string]struct{}) []string {
 	out := make([]string, 0, len(newAllowed))
 	for fqdn := range newAllowed {
 		if _, ok := oldAllowed[fqdn]; ok {
+			continue
+		}
+		out = append(out, fqdn)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// newlyRemovedFQDNs returns fqdns listed before save (allowed or #commented) but absent after.
+func newlyRemovedFQDNs(oldListed, newListed map[string]struct{}) []string {
+	out := make([]string, 0, len(oldListed))
+	for fqdn := range oldListed {
+		if _, ok := newListed[fqdn]; ok {
 			continue
 		}
 		out = append(out, fqdn)

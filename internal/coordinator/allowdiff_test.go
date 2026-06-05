@@ -36,6 +36,21 @@ func TestNewlyDeniedFQDNs(t *testing.T) {
 	require.Equal(t, []string{"onlyold.example"}, newlyDeniedFQDNs(map[string]struct{}{"onlyold.example": {}}, nil))
 }
 
+func TestNewlyRemovedFQDNs(t *testing.T) {
+	oldListed := map[string]struct{}{
+		"keep.example":    {},
+		"gone.example":    {},
+		"blocked.example": {},
+	}
+	newListed := map[string]struct{}{
+		"keep.example": {},
+	}
+	got := newlyRemovedFQDNs(oldListed, newListed)
+	require.Equal(t, []string{"blocked.example", "gone.example"}, got)
+	require.Empty(t, newlyRemovedFQDNs(newListed, newListed))
+	require.Equal(t, []string{"solo.example"}, newlyRemovedFQDNs(map[string]struct{}{"solo.example": {}}, nil))
+}
+
 func TestCanonIPsUniqueStable(t *testing.T) {
 	require.Empty(t, canonIPsUniqueStable(nil))
 	require.Empty(t, canonIPsUniqueStable([]string{"bogus"}))

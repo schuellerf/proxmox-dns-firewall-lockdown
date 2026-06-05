@@ -17,6 +17,18 @@ func TestSplicePreservesOutside(t *testing.T) {
 	require.Contains(t, got, "after")
 }
 
+func TestParseListedIncludesBlocked(t *testing.T) {
+	lines := []string{"#off.example", "on.", "", "  # also.example.  "}
+	got := ParseListed(lines)
+	_, off := got[Normalize("off.example")]
+	_, on := got[Normalize("on.")]
+	_, also := got[Normalize("also.example")]
+	require.True(t, off)
+	require.True(t, on)
+	require.True(t, also)
+	require.Len(t, got, 3)
+}
+
 func TestParseAllowedSkipsHashes(t *testing.T) {
 	inner := []string{"#off", "on."}
 	got := ParseAllowed(inner)
