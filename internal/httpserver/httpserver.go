@@ -16,6 +16,7 @@ import (
 // Listen starts the admin HTTP server on addr (typically ":80").
 func Listen(addr string, c *coordinator.Coordinator) *http.Server {
 	mux := http.NewServeMux()
+	registerStaticRoutes(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(w, pageHTML())
@@ -201,8 +202,22 @@ func pageHTML() string {
 <head>
 <meta charset="utf-8"/>
 <title>pve-dns-lockdown</title>
+<link rel="icon" href="/assets/logo.svg" type="image/svg+xml"/>
+<link rel="icon" href="/assets/logo.png" type="image/png" sizes="32x32"/>
 <style>
 body{font-family:system-ui,sans-serif;max-width:960px;margin:1rem auto;padding:0 1rem}
+.page-header{display:flex;align-items:center;gap:.75rem;margin:0 0 1rem 0;flex-wrap:wrap}
+.page-header h1{margin:0;flex:1;min-width:12rem}
+.site-logo{flex-shrink:0;display:block}
+.about-btn{margin:0;padding:.25rem .6rem;font-size:87.5%;cursor:pointer;border:1px solid #adb5bd;border-radius:4px;background:#f8f9fa}
+.about-btn:hover{background:#e9ecef}
+#about_dialog{border:1px solid #ccc;border-radius:6px;padding:1rem 1.25rem;max-width:min(960px,95vw)}
+#about_dialog::backdrop{background:rgba(0,0,0,.35)}
+.about-close{float:right;margin:0;padding:0 .35rem;font-size:1.25rem;line-height:1;border:none;background:transparent;cursor:pointer;color:#444}
+.about-version{margin:.25rem 0 .5rem 0}
+.about-template{margin:0 0 .75rem 0;font-size:87.5%;color:#444;font-family:ui-monospace,monospace;word-break:break-word}
+.about-banner{width:100%;height:auto;margin-top:.5rem}
+.hidden{display:none!important}
 textarea{width:100%;min-height:14rem;font-family:ui-monospace,monospace}
 .danger{background:#f8d7da;border:1px solid #721c24;padding:.5rem 1rem;margin:.5rem 0}
 .muted{background:#e2e3e5;border:1px solid #383d41;padding:.5rem 1rem;margin:.5rem 0}
@@ -241,7 +256,18 @@ small{color:#444}
 </style>
 </head>
 <body>
+<header class="page-header">
+<img src="/assets/logo.svg" alt="" class="site-logo" width="36" height="36"/>
 <h1 id="page_title">pve-dns-lockdown</h1>
+<button type="button" id="about_btn" class="about-btn" aria-haspopup="dialog">About</button>
+</header>
+<dialog id="about_dialog">
+<button type="button" class="about-close" aria-label="Close">&times;</button>
+<p class="about-version"><strong>pve-dns-lockdown</strong> <span id="app_version"></span></p>
+<p id="about_template" class="about-template"></p>
+<img id="about_banner" alt="pve-dns-lockdown" class="about-banner hidden"/>
+<p id="about_banner_missing" class="about-banner-missing hidden">Banner image not available on this host.</p>
+</dialog>
 <div id="proxmox_err" role="alert" aria-live="polite"></div>
 <div id="banner"></div>
 <h2>Allow list <small>(use Allowed/Blocked per name — saves immediately; new DNS names appear as blocked suggestions)</small></h2>
@@ -670,5 +696,29 @@ const es = new EventSource('/stream');
 es.onmessage = (ev)=>{ try{ applyState(JSON.parse(ev.data)); }catch(_){} };
 es.onerror = ()=>{ el('status').textContent='SSE interrupted (retrying…)'; };
 fetch('/api/snapshot').then(r=>r.json()).then(applyState).catch(()=>{});
+const aboutDialog=el('about_dialog');
+let bannerLoaded=false;
+el('about_btn').addEventListener('click',()=>{
+  if(!bannerLoaded){
+    const img=el('about_banner');
+    const miss=el('about_banner_missing');
+    img.onload=()=>{img.classList.remove('hidden');miss.classList.add('hidden');};
+    img.onerror=()=>{img.classList.add('hidden');miss.classList.remove('hidden');};
+    img.src='/assets/banner.png';
+    bannerLoaded=true;
+  }
+  aboutDialog.showModal();
+});
+aboutDialog.querySelector('.about-close').addEventListener('click',()=>aboutDialog.close());
+aboutDialog.addEventListener('click',(ev)=>{if(ev.target===aboutDialog) aboutDialog.close();});
+fetch('/api/version').then(r=>r.json()).then((v)=>{
+  const stamp=(v&&v.stamp)||'dev';
+  const base=(v&&v.template_basename)||'pve-dns-lockdown_ct-template';
+  el('app_version').textContent='build '+stamp;
+  el('about_template').textContent='CT template: '+base+'_'+stamp+'_<arch>.tar.gz';
+}).catch(()=>{
+  el('app_version').textContent='build dev';
+  el('about_template').textContent='';
+});
 </script></body></html>`
 }

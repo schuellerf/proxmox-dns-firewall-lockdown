@@ -8,6 +8,8 @@ DIST_DIR := $(ROOT)/dist
 TEMPLATE_BASENAME ?= pve-dns-lockdown_ct-template
 COREDNS_VER := v1.12.4
 GO_MODULE := github.com/schuellerf/proxmox-dns-firewall-lockdown
+BUILD_STAMP ?= dev
+LDFLAGS := -X $(GO_MODULE)/internal/version.Stamp=$(BUILD_STAMP)
 
 BUILD_DIR := $(ROOT)/.build
 # Versioned tree so bumping COREDNS_VER automatically reclones; go.mod replace still points at ./.build/coredns
@@ -47,7 +49,7 @@ vendor-coredns: $(COREDNS_HEAD) ## Fetch CoreDNS into .build/$(COREDNS_VER)/; bu
 build-coredns: vendor-coredns ## Build bin/pve-dns-lockdown (runs go generate inside CoreDNS checkout)
 	cd "$(COREDNS_SRC)" && GOFLAGS=-buildvcs=false go generate coredns.go && GOFLAGS=-buildvcs=false go get ./...
 	mkdir -p "$(ROOT)/bin"
-	cd "$(ROOT)" && GOFLAGS=-buildvcs=false go build -o "$(ROOT)/bin/pve-dns-lockdown" ./cmd/pve-dns-lockdown
+	cd "$(ROOT)" && GOFLAGS=-buildvcs=false go build -ldflags "$(LDFLAGS)" -o "$(ROOT)/bin/pve-dns-lockdown" ./cmd/pve-dns-lockdown
 
 test: vendor-coredns ## Run go test for this repo
 	cd "$(COREDNS_SRC)" && GOFLAGS=-buildvcs=false go generate coredns.go && GOFLAGS=-buildvcs=false go get ./...
@@ -56,13 +58,19 @@ test: vendor-coredns ## Run go test for this repo
 clean: clean-dist ## Remove bin/, dist/, and entire .build/ (CoreDNS checkout)
 	rm -rf "$(ROOT)/bin" "$(BUILD_DIR)"
 
-proxmox-ct-image: build-coredns ## Build OCI image from Containerfile tagged as $(IMAGE_TAG)
-	"$(CONTAINER_RUNTIME)" build -f "$(ROOT)/Containerfile" -t "$(IMAGE_TAG)" "$(ROOT)"
+proxmox-ct-image: vendor-coredns ## Build OCI image from Containerfile tagged as $(IMAGE_TAG)
+	"$(CONTAINER_RUNTIME)" build -f "$(ROOT)/Containerfile" \
+		--build-arg BUILD_STAMP="$(BUILD_STAMP)" \
+		-t "$(IMAGE_TAG)" "$(ROOT)"
 
-proxmox-ct: proxmox-ct-image ## Host binary + OCI image + gzip rootfs tarball for Proxmox vztmpl
+proxmox-ct: ## Host binary + OCI image + gzip rootfs tarball for Proxmox vztmpl (single BUILD_STAMP)
 	@STAMP=$$(date +%Y%m%d_%H%M%S); \
+	$(MAKE) build-coredns BUILD_STAMP=$$STAMP; \
+	"$(CONTAINER_RUNTIME)" build -f "$(ROOT)/Containerfile" \
+		--build-arg BUILD_STAMP=$$STAMP \
+		-t "$(IMAGE_TAG)" "$(ROOT)"; \
 	ROOT="$(ROOT)" CONTAINER_RUNTIME="$(CONTAINER_RUNTIME)" IMAGE_TAG="$(IMAGE_TAG)" \
-		DIST_DIR="$(DIST_DIR)" TEMPLATE_BASENAME="$(TEMPLATE_BASENAME)" TEMPLATE_STAMP="$$STAMP" \
+		DIST_DIR="$(DIST_DIR)" TEMPLATE_BASENAME="$(TEMPLATE_BASENAME)" TEMPLATE_STAMP=$$STAMP \
 		sh "$(ROOT)/scripts/export-proxmox-ct-rootfs.sh"
 
 clean-dist: ## Remove generated dist/ CT template tarballs

@@ -1,9 +1,10 @@
 FROM golang:bookworm AS build
+ARG BUILD_STAMP=dev
 WORKDIR /src
 COPY . .
 ENV GOFLAGS=-buildvcs=false
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
-RUN make build-coredns
+RUN make build-coredns BUILD_STAMP=${BUILD_STAMP}
 
 FROM debian:bookworm
 ENV DEBIAN_FRONTEND=noninteractive
@@ -37,6 +38,7 @@ RUN ln -sf /lib/systemd/system/networking.service \
 COPY --from=build /src/bin/pve-dns-lockdown /usr/local/bin/pve-dns-lockdown
 COPY Corefile.example /etc/pve-dns-lockdown/Corefile
 COPY docs /usr/share/doc/pve-dns-lockdown/
+COPY packaging/banner.png /usr/share/pve-dns-lockdown/www/banner.png
 
 STOPSIGNAL SIGRTMIN+3
 EXPOSE 53/tcp 53/udp 80/tcp
