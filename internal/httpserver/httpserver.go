@@ -215,28 +215,48 @@ small{color:#444}
 #settings_msg.err{background:#f8d7da;border:1px solid #721c24;padding:.5rem 1rem;margin:.5rem 0}
 #settings_msg_ok:empty{display:none}
 #settings_msg_ok.ok{font-size:87.5%;line-height:1.35;color:#155724;background:#d4edda;border:1px solid #c3e6cb;padding:.4rem .75rem;margin:.35rem 0 0 0}
-#proxmox_err:empty,#allowlist_msg:empty{display:none}
+#proxmox_err:empty,#allowlist_msg:empty,#allowlist_notify:empty{display:none}
 #proxmox_err.err,#allowlist_msg.err{font-size:93%;white-space:pre-wrap;word-break:break-word;line-height:1.35;background:#f8d7da;border:1px solid #721c24;padding:.75rem 1rem;margin:.5rem 0}
+#allowlist_notify.notify{background:#fff3cd;border:1px solid #856404;padding:.75rem 1rem;margin:.5rem 0;display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}
+#allowlist_notify .notify-dismiss,#allowlist_notify .notify-enable{margin:0;font-size:87.5%;padding:.2rem .5rem}
 .settings-form input:invalid,.settings-form select:invalid{box-shadow:0 0 0 2px #c00;border-color:#c00}
 #firewall_activity{list-style:none;padding:0;margin:0;max-height:16rem;overflow:auto;font-family:ui-monospace,monospace;font-size:82%;line-height:1.35}
 #firewall_activity li{margin:.25rem 0;padding:.35rem .5rem;border:1px solid #ccc;border-radius:4px;background:#fafafa;word-break:break-word}
 #firewall_activity li.fw-err{background:#f8d7da;border-color:#721c24}
 #firewall_activity li.fw-ok{border-color:#c3e6cb;background:#e8f5e9}
 #firewall_activity li.fw-empty{background:#f5f5f5;border-color:#ddd;color:#444}
+#allowlist_entries{list-style:none;padding:0;margin:0;max-height:20rem;overflow:auto}
+.allowlist-row{display:flex;align-items:center;gap:.5rem;margin:.25rem 0;padding:.35rem .5rem;border:1px solid #ccc;border-radius:4px;background:#fafafa;font-family:ui-monospace,monospace;font-size:90%;line-height:1.35}
+.allowlist-row.is-disabled{background:#f5f5f5;color:#555}
+.allowlist-row.is-new{animation:allowlist-pulse 3s ease-out}
+.allowlist-row.allowlist-empty{color:#444;font-family:system-ui,sans-serif;font-size:87.5%}
+.allowlist-toggle{margin:0;min-width:4.5rem;padding:.25rem .5rem;font-size:82%;cursor:pointer;border-radius:4px;border:1px solid #aaa}
+.allowlist-toggle.is-allowed{background:#d4edda;border-color:#c3e6cb;color:#155724}
+.allowlist-toggle.is-blocked{background:#e2e3e5;border-color:#adb5bd;color:#383d41}
+.allowlist-toggle:disabled{opacity:.55;cursor:wait}
+.allowlist-name{flex:1;word-break:break-word}
+#allowlist_advanced{margin-top:.75rem}
+#allowlist_advanced summary{cursor:pointer;font-size:93%;color:#444}
+@keyframes allowlist-pulse{0%,15%{background:#fff3cd;border-color:#856404}100%{background:#fafafa;border-color:#ccc}}
 </style>
 </head>
 <body>
 <h1 id="page_title">pve-dns-lockdown</h1>
 <div id="proxmox_err" role="alert" aria-live="polite"></div>
 <div id="banner"></div>
-<h2>Allow list <small>(remove leading # to enable a name; Save applies)</small></h2>
-<textarea id="list" spellcheck="false"></textarea>
+<h2>Allow list <small>(use Allow/Block per name — saves immediately; new DNS names appear as blocked suggestions)</small></h2>
+<div id="allowlist_notify" role="status" aria-live="polite"></div>
+<ul id="allowlist_entries" aria-label="Allow list entries"></ul>
 <div id="allowlist_msg" role="status"></div>
+<p><span id="status"></span></p>
+<details id="allowlist_advanced">
+<summary>Advanced / raw edit</summary>
+<textarea id="list" spellcheck="false"></textarea>
 <p>
 <button id="save" disabled>Save</button>
 <button id="revert" type="button" disabled>Revert</button>
-<span id="status"></span>
 </p>
+</details>
 <h2>Egress firewall <small>(DNS → Proxmox rules)</small></h2>
 <p class="muted" style="font-size:87%">Only names enabled in the allow list above are opened on the firewall. Reconcile uses this list immediately after Save, and refreshes from the VM when guest config reads succeed — so it still tracks the textarea even when Proxmox read fails intermittently. Outcomes listed are mutations or API errors only (duplicate lookups with an unchanged rule stay quiet).</p>
 <ul id="firewall_activity" aria-live="polite"></ul>
@@ -258,7 +278,218 @@ small{color:#444}
 <script>
 const el=(id)=>document.getElementById(id);
 let dirty=false,lastClean='',settingsDirty=false;
+let saveInFlight=false,pendingState=null;
+let knownFQDNs=null,baseTitle='pve-dns-lockdown';
+let titleFlashTimer=null,titleFlashStop=null;
 const list=el('list'),saveBtn=el('save'),revertBtn=el('revert'),banner=el('banner');
+const allowlistEntries=el('allowlist_entries');
+function normalizeFQDN(s){
+  s=String(s||'').trim().toLowerCase();
+  if(s.endsWith('.')) s=s.slice(0,-1);
+  return s;
+}
+function parseAllowlistText(text){
+  const entries=[];
+  for(const raw of String(text||'').split('\n')){
+    const trimmed=raw.trim();
+    if(!trimmed) continue;
+    let allowed=true,name=trimmed;
+    if(trimmed.startsWith('#')){
+      allowed=false;
+      name=trimmed.slice(1).trim();
+    }
+    const fqdn=normalizeFQDN(name);
+    if(!fqdn) continue;
+    entries.push({raw,fqdn,allowed,display:name});
+  }
+  return entries;
+}
+function lineForEntry(e){
+  const line=e.fqdn+'.';
+  return e.allowed?line:'# '+line;
+}
+function serializeAllowlistEntries(entries){
+  return entries.map(lineForEntry).join('\n');
+}
+function displayName(entry){
+  let n=entry.display||entry.fqdn;
+  if(n&&!n.endsWith('.')) n=n+'.';
+  return n;
+}
+function detectNewFQDNs(prevSet,text){
+  const entries=parseAllowlistText(text);
+  const cur=new Set(entries.map(e=>e.fqdn));
+  const news=[];
+  if(prevSet){
+    for(const f of cur){
+      if(!prevSet.has(f)) news.push(f);
+    }
+  }
+  news.sort();
+  return {current:cur,newOnes:news};
+}
+function stopTitleFlash(){
+  if(titleFlashTimer){clearInterval(titleFlashTimer);titleFlashTimer=null;}
+  if(titleFlashStop){clearTimeout(titleFlashStop);titleFlashStop=null;}
+  document.title=baseTitle;
+}
+function startTitleFlash(names){
+  stopTitleFlash();
+  if(!document.hidden||!names.length) return;
+  let flip=false;
+  const sample=names[0]+(names.length>1?' +'+names.length:'');
+  titleFlashTimer=setInterval(()=>{
+    document.title=flip?'(*) New: '+sample:baseTitle;
+    flip=!flip;
+  },1200);
+  titleFlashStop=setTimeout(stopTitleFlash,30000);
+}
+function showAllowlistNotify(names){
+  const box=el('allowlist_notify');
+  if(!names.length){box.className='';box.textContent='';return;}
+  box.className='notify';
+  const label=names.length===1?names[0]+'.':names.map(n=>n+'.').join(', ');
+  box.replaceChildren();
+  const span=document.createElement('span');
+  span.textContent='New DNS name'+(names.length>1?'s':'')+': '+label;
+  box.appendChild(span);
+  const dismiss=document.createElement('button');
+  dismiss.type='button';
+  dismiss.className='notify-dismiss';
+  dismiss.textContent='Dismiss';
+  dismiss.addEventListener('click',()=>{box.className='';box.textContent='';});
+  box.appendChild(dismiss);
+  if(typeof Notification!=='undefined'){
+    if(Notification.permission==='granted'){
+      for(const f of names){
+        const n=new Notification('New DNS name',{body:f+'.',tag:'pve-dns-new-'+f});
+        n.onclick=()=>{window.focus();n.close();};
+      }
+    }else if(Notification.permission==='default'){
+      const enable=document.createElement('button');
+      enable.type='button';
+      enable.className='notify-enable';
+      enable.textContent='Enable notifications';
+      enable.addEventListener('click',async()=>{
+        try{await Notification.requestPermission();}catch(_){}
+        enable.remove();
+      });
+      box.appendChild(enable);
+    }
+  }
+}
+function highlightNewRows(names){
+  if(!names.length) return;
+  const set=new Set(names);
+  let first=null;
+  for(const li of allowlistEntries.querySelectorAll('.allowlist-row')){
+    const f=li.dataset.fqdn;
+    if(!set.has(f)) continue;
+    li.classList.add('is-new');
+    setTimeout(()=>li.classList.remove('is-new'),3000);
+    if(!first) first=li;
+  }
+  if(first) first.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function notifyNewNames(names){
+  if(!names.length) return;
+  showAllowlistNotify(names);
+  highlightNewRows(names);
+  startTitleFlash(names);
+}
+function renderAllowlistRows(text,{disabled=false}={}){
+  const entries=parseAllowlistText(text);
+  allowlistEntries.replaceChildren();
+  if(entries.length===0){
+    const li=document.createElement('li');
+    li.className='allowlist-row allowlist-empty';
+    li.textContent='No names yet — DNS lookups from the guest will appear here as blocked suggestions.';
+    allowlistEntries.appendChild(li);
+    return;
+  }
+  for(const entry of entries){
+    const li=document.createElement('li');
+    li.className='allowlist-row'+(entry.allowed?'':' is-disabled');
+    li.dataset.fqdn=entry.fqdn;
+    const btn=document.createElement('button');
+    btn.type='button';
+    btn.className='allowlist-toggle'+(entry.allowed?' is-allowed':' is-blocked');
+    btn.textContent=entry.allowed?'Allow':'Block';
+    btn.title=entry.allowed?'Allowed — click to block':'Blocked — click to allow';
+    btn.disabled=disabled||saveInFlight;
+    btn.addEventListener('click',()=>toggleAllowlistRow(entry.fqdn));
+    li.appendChild(btn);
+    const name=document.createElement('span');
+    name.className='allowlist-name';
+    name.textContent=displayName(entry);
+    li.appendChild(name);
+    allowlistEntries.appendChild(li);
+  }
+}
+function setAllowlistMsg(cls,text){
+  const msgEl=el('allowlist_msg');
+  msgEl.className=cls||'';
+  msgEl.textContent=text||'';
+}
+async function saveAllowlistText(text){
+  if(saveInFlight) return false;
+  saveInFlight=true;
+  renderAllowlistRows(text,{disabled:true});
+  el('status').textContent='Saving…';
+  if(!dirty) setAllowlistMsg('','');
+  try{
+    const r=await fetch('/api/save-list',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:text});
+    const respText=await r.text();
+    let j=null;try{j=JSON.parse(respText);}catch(_){}
+    if(!r.ok){
+      const body=(j&&j.error)||respText||('HTTP '+r.status);
+      const hint=(j&&j.error_detail)?('\n\n'+j.error_detail):'';
+      setAllowlistMsg('err',body+hint);
+      el('status').textContent='Allow list save failed ('+r.status+')';
+      renderAllowlistRows(lastClean);
+      return false;
+    }
+    dirty=false;
+    lastClean=text;
+    list.value=text;
+    saveBtn.disabled=true;
+    revertBtn.disabled=true;
+    renderAllowlistRows(text);
+    el('status').textContent='Saved';
+    return true;
+  }finally{
+    saveInFlight=false;
+    if(pendingState){
+      const ps=pendingState;
+      pendingState=null;
+      applyState(ps);
+    }
+  }
+}
+function toggleAllowlistRow(fqdn){
+  if(dirty||saveInFlight) return;
+  const entries=parseAllowlistText(lastClean);
+  let found=false;
+  for(const e of entries){
+    if(e.fqdn!==fqdn) continue;
+    e.allowed=!e.allowed;
+    found=true;
+    break;
+  }
+  if(!found) return;
+  saveAllowlistText(serializeAllowlistEntries(entries));
+}
+function syncAllowlistFromServer(text){
+  const {current,newOnes}=detectNewFQDNs(knownFQDNs,text);
+  const isFirst=knownFQDNs===null;
+  if(!isFirst&&newOnes.length) notifyNewNames(newOnes);
+  knownFQDNs=current;
+  list.value=text;
+  lastClean=text;
+  saveBtn.disabled=true;
+  revertBtn.disabled=true;
+  renderAllowlistRows(text);
+}
 function clearSettingsMsg(){
   ['settings_msg','settings_msg_ok'].forEach((id)=>{
     const n=el(id); n.className=''; n.textContent='';
@@ -330,6 +561,7 @@ function pageHeading(s){
 }
 function applyState(s){
   pageHeading(s);
+  baseTitle=document.title;
   setProxmoxErr(s);
   policyBanner(s);
   renderFirewallActivity(s);
@@ -344,39 +576,38 @@ function applyState(s){
     el('insecure_tls').checked=!!s.form.insecure_tls;
   }
   syncCredRequired(s);
-  if(!dirty){
-    list.value=s.merged_list_text||'';lastClean=list.value;
-    saveBtn.disabled=true;revertBtn.disabled=true;
+  if(saveInFlight){
+    pendingState=s;
+    return;
   }
+  if(dirty){
+    setAllowlistMsg('','Raw edit in progress — save or revert to sync toggles.');
+    return;
+  }
+  if(el('allowlist_msg').className!=='err') setAllowlistMsg('','');
+  syncAllowlistFromServer(s.merged_list_text||'');
 }
 el('settings_form').addEventListener('input',()=>{settingsDirty=true;clearSettingsMsg();});
 el('settings_form').addEventListener('change',()=>{settingsDirty=true;clearSettingsMsg();});
+el('allowlist_advanced').addEventListener('toggle',()=>{
+  if(el('allowlist_advanced').open&&!dirty) list.value=lastClean;
+});
 list.addEventListener('input',()=>{
-  dirty=true;saveBtn.disabled=(list.value===lastClean);revertBtn.disabled=!dirty;
-  el('allowlist_msg').className=''; el('allowlist_msg').textContent='';
+  dirty=true;
+  saveBtn.disabled=(list.value===lastClean);
+  revertBtn.disabled=!dirty;
+  setAllowlistMsg('','Raw edit in progress — save or revert to sync toggles.');
 });
 el('revert').addEventListener('click',()=>{
-  list.value=lastClean;dirty=false;saveBtn.disabled=true;revertBtn.disabled=true;
-  el('allowlist_msg').className=''; el('allowlist_msg').textContent='';
+  list.value=lastClean;
+  dirty=false;
+  saveBtn.disabled=true;
+  revertBtn.disabled=true;
+  setAllowlistMsg('','');
+  renderAllowlistRows(lastClean);
 });
-el('save').addEventListener('click',async()=>{
-  el('status').textContent='Saving…';
-  const msgEl=el('allowlist_msg');
-  msgEl.className=''; msgEl.textContent='';
-  const r=await fetch('/api/save-list',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:list.value});
-  const text=await r.text();
-  let j=null; try{ j=JSON.parse(text);}catch(_){}
-  if(!r.ok){
-    const body=(j&&j.error)||text||('HTTP '+r.status);
-    const hint=(j&&j.error_detail)?('\n\n'+j.error_detail):'';
-    msgEl.className='err';
-    msgEl.textContent=body+hint;
-    el('status').textContent='Allow list save failed ('+r.status+')';
-    return;
-  }
-  dirty=false;lastClean=list.value;saveBtn.disabled=true;revertBtn.disabled=true;
-  el('status').textContent='Saved';
-});
+el('save').addEventListener('click',()=>{saveAllowlistText(list.value);});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden) stopTitleFlash();});
 el('settings_form').addEventListener('submit',async(ev)=>{
   ev.preventDefault();
   const body={
